@@ -1,3 +1,5 @@
+import pytest
+
 from tests.conftest import TEST_PASSWORD
 
 
@@ -92,3 +94,28 @@ def test_internal_errors_hide_details(app, logs):
     assert resp.status_code == 500
     assert "hunter2" not in resp.get_data(as_text=True)
     assert logs.of_type("unhandled_exception")[0]["error_type"] == "RuntimeError"
+
+
+@pytest.mark.parametrize("name", [
+    "<script>alert(1)</script>",
+    "<img src=x onerror=alert(1)>",
+    'Widget" onmouseover="alert(1)',
+    "javascript:alert(1)",
+    "{{7*7}}",
+    "a; rm -rf /",
+])
+def test_markup_and_script_characters_are_rejected_in_item_names(client, name):
+    # Stored-XSS guard: nothing that could become markup is ever stored and served back.
+    resp = client.post("/api/items", json={"name": name, "price": 1})
+    assert resp.status_code == 400
+    assert any("name may only contain" in e for e in resp.get_json()["errors"])
+    assert all(item["name"] != name for item in client.get("/api/items").get_json()["items"])
+
+
+@pytest.mark.parametrize("name", ["YubiKey 5C NFC", "Cable (USB-C, 2m)", "Ledger Nano S+", "O'Reilly book #2", "Café crème"])
+def test_normal_product_names_are_still_accepted(client, name):
+    assert client.post("/api/items", json={"name": name, "price": 9.99}).status_code == 201
+
+
+def test_cross_origin_resource_policy_header(client):
+    assert client.get("/health").headers["Cross-Origin-Resource-Policy"] == "same-origin"

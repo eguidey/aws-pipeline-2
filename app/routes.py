@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import itertools
 import logging
+import re
 import threading
 
 from flask import Blueprint, current_app, jsonify, request
@@ -49,6 +50,12 @@ def get_item(item_id: int):
     return jsonify(item)
 
 
+# Item names are plain product names: letters, digits, spaces and a little punctuation.
+# Characters that can start markup or script (< > " ` { } ; & = \) are never stored, so a
+# payload can't be saved and served back to another client (stored XSS; ZAP rule 40014).
+ITEM_NAME = re.compile(r"^[\w .,'()/+#-]{1,100}$")
+
+
 def validate_item(payload) -> tuple[dict | None, list[str]]:
     """Strict allow-list validation of the request body."""
     errors: list[str] = []
@@ -60,6 +67,8 @@ def validate_item(payload) -> tuple[dict | None, list[str]]:
     name = payload.get("name")
     if not isinstance(name, str) or not 1 <= len(name.strip()) <= 100:
         errors.append("name must be a string of 1-100 characters")
+    elif not ITEM_NAME.fullmatch(name.strip()):
+        errors.append("name may only contain letters, numbers, spaces and . , ' ( ) / + # -")
     price = payload.get("price")
     if isinstance(price, bool) or not isinstance(price, (int, float)) or not 0 <= price <= 1_000_000:
         errors.append("price must be a number between 0 and 1,000,000")
