@@ -1,0 +1,5 @@
+# Server errors and slow requests - useful when triaging a possible DoS or exploit.
+fields @timestamp, src_ip, method, path, status, duration_ms, request_id
+| filter event_type = "http_request" and (status >= 500 or duration_ms > 1000)
+| sort @timestamp desc
+| limit 100

@@ -1,0 +1,5 @@
+# Every deployment with its supply-chain evidence: signature, policy gate, SBOM size and scanner results.
+fields @timestamp, version, outcome, actor, image, signature_verified, policy_passed, sbom_packages,
+       grype_critical, grype_high, grype_medium, zap_high, zap_medium, zap_low, run_url
+| filter event_type = "deployment"
+| sort @timestamp desc

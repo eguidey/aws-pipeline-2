@@ -1,0 +1,11 @@
+# Copy to bootstrap.tfvars (git-ignored) and fill in. Get the IDs with:
+#   Invoke-RestMethod https://api.github.com/repos/YOUR_USER/aws-pipeline-2 | Select-Object id, @{n="owner_id";e={$_.owner.id}}
+project_name         = "aws-pipeline-2"
+github_repository    = "YOUR_USER/aws-pipeline-2"
+github_owner_id      = "OWNER_ID"
+github_repository_id = "REPO_ID"
+
+# Your original deployment (aws-appsec-pipeline) already created the account's one GitHub
+# OIDC provider, so this stack looks it up instead of creating it. If you ever retire the
+# original, move the provider here first (docs/SETUP.md, "Retiring the original deployment").
+create_github_oidc_provider = false

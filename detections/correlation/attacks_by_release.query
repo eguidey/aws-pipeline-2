@@ -1,0 +1,6 @@
+# Security events grouped by the release that was running when they happened.
+# A spike right after a deployment is worth investigating first.
+fields version, event_type
+| filter event_type in ["auth_failure", "brute_force_suspected", "suspicious_input", "rate_limited", "unhandled_exception"]
+| stats count(*) as events, count_distinct(src_ip) as sources by version, event_type
+| sort version desc, events desc

@@ -1,0 +1,5 @@
+# Requests that matched attack signatures, newest first.
+fields @timestamp, src_ip, method, path, signatures, user_agent, request_id
+| filter event_type = "suspicious_input"
+| sort @timestamp desc
+| limit 100

@@ -1,0 +1,19 @@
+# Production - the environment the pipeline deploys to.
+# Copy to environments/prod.tfvars (git-ignored) and fill in your values.
+environment           = "prod"
+project_name          = "aws-pipeline-2"
+alert_email           = "you@example.com"
+github_repository     = "YOUR_USER/aws-pipeline-2"
+github_owner_id       = "OWNER_ID"
+github_repository_id  = "REPO_ID"
+allowed_ingress_cidrs = ["YOUR.IP.HERE/32"]
+auto_response_mode    = "block"
+vpc_cidr              = "10.42.0.0/16"
+
+# The original deployment owns this region's single AWS Config recorder.
+# Set to true only after the original is destroyed.
+enable_aws_config = false
+
+# Optional - task size. Must be a valid Fargate pair within policy/rules.json.
+# task_cpu    = 256
+# task_memory = 512

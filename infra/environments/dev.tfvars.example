@@ -1,0 +1,16 @@
+# Development - a separate copy of the infrastructure for testing Terraform changes
+# before they reach production. Own state file (dev.backend.hcl), own resource names.
+# Account-wide singletons belong to prod, so they're switched off here.
+environment                 = "dev"
+project_name                = "aws-pipeline-2-dev"
+alert_email                 = "you@example.com"
+github_repository           = "YOUR_USER/aws-pipeline-2"
+github_owner_id             = "OWNER_ID"
+github_repository_id        = "REPO_ID"
+github_deploy_branch        = "dev"
+github_environment          = "development"
+allowed_ingress_cidrs       = ["YOUR.IP.HERE/32"]
+vpc_cidr                    = "10.43.0.0/16"
+enable_aws_config           = false # only one AWS Config recorder is allowed per region
+auto_response_mode          = "notify"
+monthly_budget_usd          = 5

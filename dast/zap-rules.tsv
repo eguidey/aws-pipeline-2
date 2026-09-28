@@ -1,0 +1,10 @@
+# ZAP rule overrides: <rule id> TAB <IGNORE|INFO|WARN|FAIL> TAB <note>
+# Injection-class findings FAIL the build; everything else is reported as a warning.
+40018	FAIL	SQL Injection
+40019	FAIL	SQL Injection - MySQL
+40012	FAIL	Cross Site Scripting (Reflected)
+40014	FAIL	Cross Site Scripting (Persistent)
+90020	FAIL	Remote OS Command Injection
+90019	FAIL	Server Side Code Injection
+6	FAIL	Path Traversal
+7	FAIL	Remote File Inclusion

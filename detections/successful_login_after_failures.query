@@ -1,0 +1,6 @@
+# Possible account compromise: a source that failed several logins, then succeeded.
+fields src_ip, user, strcontains(event_type, "auth_failure") as is_failure, strcontains(event_type, "auth_success") as is_success
+| filter event_type in ["auth_failure", "auth_success"]
+| stats sum(is_failure) as failures, sum(is_success) as successes by src_ip, user
+| filter failures >= 3 and successes >= 1
+| sort failures desc

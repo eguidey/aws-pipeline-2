@@ -1,0 +1,58 @@
+openapi: 3.0.3
+info:
+  title: AppSec API
+  version: "1.0"
+  description: Contract used by the OWASP ZAP API scan in the pipeline (DAST).
+servers:
+  - url: http://api:8000
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200": { description: OK }
+  /api/items:
+    get:
+      summary: List items
+      parameters:
+        - { name: search, in: query, required: false, schema: { type: string } }
+      responses:
+        "200": { description: OK }
+    post:
+      summary: Create an item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, price]
+              properties:
+                name: { type: string, example: "Hardware security key" }
+                price: { type: number, example: 49.99 }
+      responses:
+        "201": { description: Created }
+        "400": { description: Validation error }
+  /api/items/{item_id}:
+    get:
+      summary: Get one item
+      parameters:
+        - { name: item_id, in: path, required: true, schema: { type: integer, example: 1 } }
+      responses:
+        "200": { description: OK }
+        "404": { description: Not found }
+  /api/login:
+    post:
+      summary: Demo login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: { type: string, example: analyst }
+                password: { type: string, example: not-the-password }
+      responses:
+        "200": { description: Logged in }
+        "401": { description: Invalid credentials }

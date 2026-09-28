@@ -1,0 +1,400 @@
+name: AppSec Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege by default; jobs that talk to AWS or Sigstore add id-token: write.
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# SUPPLY-CHAIN NOTE: every third-party action is pinned to a full commit SHA, not a tag.
+# Tags can be moved to malicious code (as in the March 2026 trivy-action compromise);
+# a SHA can't. Dependabot still proposes updates, pinned to the new SHA.
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Only push/deploy from main, and only once the AWS infrastructure exists.
+  CAN_DEPLOY: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != '' }}
+  ZAP_IMAGE: ghcr.io/zaproxy/zaproxy:stable
+
+jobs:
+  # ---------------------------------------------------------------- 1. Unit tests + lint
+  test:
+    name: Lint & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Lint (ruff)
+        run: ruff check .
+      - name: Unit & security tests (API + auto-response Lambda)
+        run: pytest -v
+
+  # ---------------------------------------------------------------- 2. SAST
+  sast:
+    name: SAST (Bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install "bandit>=1.7"
+      - name: Scan application and Lambda code
+        run: bandit -r app lambda policy wsgi.py gunicorn.conf.py --severity-level medium --confidence-level medium
+
+  # ---------------------------------------------------------------- 3. Dependency CVEs
+  dependencies:
+    name: Dependency scan (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install "pip-audit>=2.7"
+      - name: Check pinned dependencies against known vulnerabilities
+        run: pip-audit -r requirements.txt --strict --desc
+
+  # ---------------------------------------------------------------- 4. Secrets
+  secrets:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # scan the full history, not just the latest commit
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------- 5. IaC misconfigurations
+  iac:
+    name: IaC scan (Checkov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_wrapper: false
+      - name: Terraform format check
+        run: terraform fmt -check -recursive -diff infra
+      - name: Terraform validate (root + all modules)
+        working-directory: infra
+        run: terraform init -backend=false -input=false && terraform validate
+      - name: Terraform validate (state bootstrap)
+        working-directory: infra/bootstrap
+        run: terraform init -backend=false -input=false && terraform validate
+      - run: pip install checkov
+      - name: Scan Terraform (app stack + modules + state bootstrap)
+        run: checkov -d infra --framework terraform --compact --quiet
+      - name: Scan Dockerfile
+        run: checkov -f Dockerfile --framework dockerfile --compact --quiet
+
+  # ---------------------------------------------------------------- 6. Build, scan, DAST, sign, push
+  image:
+    name: Build, scan, DAST & sign image
+    needs: [test, sast, dependencies, secrets, iac]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC for AWS and for keyless Sigstore signing (used only on main)
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+      sbom_packages: ${{ steps.grype_summary.outputs.sbom_packages }}
+      grype_critical: ${{ steps.grype_summary.outputs.critical }}
+      grype_high: ${{ steps.grype_summary.outputs.high }}
+      grype_medium: ${{ steps.grype_summary.outputs.medium }}
+      zap_high: ${{ steps.dast.outputs.high }}
+      zap_medium: ${{ steps.dast.outputs.medium }}
+      zap_low: ${{ steps.dast.outputs.low }}
+    env:
+      LOCAL_TAG: aws-pipeline-2:${{ github.sha }}
+      SIGNER_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image (with GitHub Actions layer cache)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: ${{ env.LOCAL_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      # --- Container scanning: two scanners, two vulnerability databases ---
+      - name: Trivy image scan - fail on fixable HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.LOCAL_TAG }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Generate SBOM (Syft, SPDX)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ env.LOCAL_TAG }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          artifact-name: sbom.spdx.json
+          upload-release-assets: false
+
+      - name: Grype scan of the SBOM (second opinion, recorded not blocking)
+        id: grype
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          sbom: sbom.spdx.json
+          fail-build: false
+          output-format: json
+
+      - name: Summarise SBOM and Grype results
+        id: grype_summary
+        env:
+          GRYPE_JSON: ${{ steps.grype.outputs.json }}
+        run: |
+          count() { jq --arg s "$1" '[.matches[]? | select(.vulnerability.severity == $s)] | length' "$GRYPE_JSON"; }
+          PACKAGES=$(jq '.packages | length' sbom.spdx.json)
+          {
+            echo "sbom_packages=$PACKAGES"
+            echo "critical=$(count Critical)"
+            echo "high=$(count High)"
+            echo "medium=$(count Medium)"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Supply chain"
+            echo "| SBOM packages | Grype critical | high | medium |"
+            echo "|---|---|---|---|"
+            echo "| $PACKAGES | $(count Critical) | $(count High) | $(count Medium) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # --- DAST: attack the running container with OWASP ZAP ---
+      - name: DAST - OWASP ZAP API scan (fail on injection-class findings)
+        id: dast
+        run: |
+          docker network create dast
+          docker run -d --name api --network dast \
+            -e APP_DEMO_PASSWORD="dast-$(openssl rand -hex 16)" \
+            -e RATE_LIMIT_PER_MINUTE=100000 -e BRUTE_FORCE_THRESHOLD=100000 -e APP_VERSION=dast \
+            "$LOCAL_TAG"
+          for _ in $(seq 1 30); do
+            docker exec api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)" && break
+            sleep 2
+          done
+
+          mkdir -p zap && cp dast/openapi.yaml dast/zap-rules.tsv zap/ && chmod -R 777 zap
+          set +e
+          docker run --rm --network dast -v "$PWD/zap:/zap/wrk:rw" "$ZAP_IMAGE" \
+            zap-api-scan.py -t openapi.yaml -f openapi -O http://api:8000 \
+            -c zap-rules.tsv -I -r zap-report.html -J zap-report.json
+          ZAP_EXIT=$?
+          set -e
+          docker logs api > zap/api-container.log 2>&1 || true
+
+          risk() { jq --arg r "$1" '[.site[]?.alerts[]? | select(.riskcode == $r)] | length' zap/zap-report.json 2>/dev/null || echo 0; }
+          { echo "high=$(risk 3)"; echo "medium=$(risk 2)"; echo "low=$(risk 1)"; } >> "$GITHUB_OUTPUT"
+          {
+            echo "### DAST (OWASP ZAP)"
+            echo "| High | Medium | Low |"
+            echo "|---|---|---|"
+            echo "| $(risk 3) | $(risk 2) | $(risk 1) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 0 = pass (warnings allowed via -I), 1 = a FAIL rule matched, 3 = ZAP itself failed
+          if [ "$ZAP_EXIT" -ne 0 ]; then
+            echo "::error::ZAP exited with code $ZAP_EXIT - see the zap-report artifact"
+            exit 1
+          fi
+
+      - name: Upload DAST report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zap-report
+          path: zap/
+          if-no-files-found: ignore
+
+      # --- Publish (main only): push, then sign the exact digest ---
+      - name: Configure AWS credentials (OIDC - no stored keys)
+        if: env.CAN_DEPLOY == 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        if: env.CAN_DEPLOY == 'true'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - name: Push the exact image that was scanned
+        if: env.CAN_DEPLOY == 'true'
+        id: push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPO: ${{ vars.ECR_REPOSITORY }}
+          TAG: ${{ github.sha }}
+        run: |
+          # Tags are immutable in ECR, so a re-run of the same commit reuses the existing image.
+          if aws ecr describe-images --repository-name "$REPO" --image-ids imageTag="$TAG" > /dev/null 2>&1; then
+            echo "Image $TAG already exists in ECR - skipping push"
+          else
+            docker tag "$LOCAL_TAG" "$REGISTRY/$REPO:$TAG"
+            docker push "$REGISTRY/$REPO:$TAG"
+          fi
+          DIGEST=$(aws ecr describe-images --repository-name "$REPO" --image-ids imageTag="$TAG" \
+                   --query 'imageDetails[0].imageDigest' --output text)
+          # Deploy by digest, not tag: the digest identifies exactly these bytes.
+          echo "image=$REGISTRY/$REPO@$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        if: env.CAN_DEPLOY == 'true'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign image and attach SBOM attestation (keyless, Sigstore)
+        if: env.CAN_DEPLOY == 'true'
+        env:
+          IMAGE: ${{ steps.push.outputs.image }}
+        run: |
+          if cosign verify --certificate-identity "$SIGNER_IDENTITY" --certificate-oidc-issuer "$OIDC_ISSUER" "$IMAGE" > /dev/null 2>&1; then
+            echo "Image already signed by this workflow - skipping"
+          else
+            cosign sign --yes "$IMAGE"
+            cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$IMAGE"
+          fi
+
+  # ---------------------------------------------------------------- 7. Verify & deploy to ECS Fargate
+  deploy:
+    name: Verify signature & deploy
+    needs: image
+    if: needs.image.outputs.image != ''
+    runs-on: ubuntu-latest
+    environment: production # add required reviewers in repo settings for a manual approval gate
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE: ${{ needs.image.outputs.image }}
+      CLUSTER: ${{ vars.ECS_CLUSTER }}
+      SERVICE: ${{ vars.ECS_SERVICE }}
+      FAMILY: ${{ vars.ECS_TASK_FAMILY }}
+      DEPLOY_LOG_GROUP: /${{ vars.ECR_REPOSITORY }}/deployments
+      SIGNER_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: policy # only the policy gate is needed here
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+        id: ecr
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Admission control - refuse images not signed by this pipeline
+        id: verify
+        run: |
+          cosign verify --certificate-identity "$SIGNER_IDENTITY" --certificate-oidc-issuer "$OIDC_ISSUER" "$IMAGE" > /dev/null
+          echo "Signature verified: built and signed by $SIGNER_IDENTITY"
+
+      - name: Render new task definition revision (image pinned by digest)
+        run: |
+          aws ecs describe-task-definition --task-definition "$FAMILY" --query taskDefinition > current.json
+          jq --arg IMG "$IMAGE" --arg VER "${GITHUB_SHA::7}" '
+            .containerDefinitions[0].image = $IMG
+            | .containerDefinitions[0].environment |= map(if .name == "APP_VERSION" then .value = $VER else . end)
+            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)
+          ' current.json > new.json
+
+      # Preventive guardrail (Azure Policy "deny" equivalent): the revision is checked against
+      # policy/rules.json BEFORE AWS ever sees it - sizing, read-only root, no privilege,
+      # capabilities dropped, image from our ECR pinned by digest.
+      - name: Policy gate - block non-compliant task definitions
+        id: policy
+        env:
+          EXPECTED_REPOSITORY: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}
+        run: python3 -m policy.check taskdef new.json --expected-repository "$EXPECTED_REPOSITORY"
+
+      - name: Register task definition
+        id: taskdef
+        run: |
+          ARN=$(aws ecs register-task-definition --cli-input-json file://new.json --query taskDefinition.taskDefinitionArn --output text)
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Roll out (circuit breaker auto-rolls back failed deployments)
+        run: |
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
+            --task-definition "${{ steps.taskdef.outputs.arn }}" --desired-count 1 > /dev/null
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+
+      - name: Smoke test /health
+        run: |
+          TASK=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" --query 'taskArns[0]' --output text)
+          ENI=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" \
+                --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" --output text)
+          IP=$(aws ec2 describe-network-interfaces --network-interface-ids "$ENI" \
+                --query 'NetworkInterfaces[0].Association.PublicIp' --output text)
+          echo "Task public IP: $IP"
+          if curl -fsS --max-time 10 "http://$IP:8000/health"; then
+            echo; echo "Smoke test passed"
+          else
+            echo "::warning::Could not reach the API from GitHub. Expected if allowed_ingress_cidrs is limited to your own IP."
+          fi
+
+      # --- The bridge: record what was deployed and what its scans found ---
+      - name: Record deployment in CloudWatch (runs even if the deploy failed or was blocked)
+        if: always()
+        env:
+          OUTCOME: ${{ job.status }}
+          SIGNATURE: ${{ steps.verify.outcome }}
+          POLICY: ${{ steps.policy.outcome }}
+          SBOM_PACKAGES: ${{ needs.image.outputs.sbom_packages }}
+          GRYPE_CRITICAL: ${{ needs.image.outputs.grype_critical }}
+          GRYPE_HIGH: ${{ needs.image.outputs.grype_high }}
+          GRYPE_MEDIUM: ${{ needs.image.outputs.grype_medium }}
+          ZAP_HIGH: ${{ needs.image.outputs.zap_high }}
+          ZAP_MEDIUM: ${{ needs.image.outputs.zap_medium }}
+          ZAP_LOW: ${{ needs.image.outputs.zap_low }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          num() { if [ -z "$1" ]; then echo null; else echo "$1"; fi; }
+          jq -n -c \
+            --arg version "${GITHUB_SHA::7}" --arg commit "$GITHUB_SHA" --arg image "$IMAGE" \
+            --arg outcome "$OUTCOME" --arg sig "$SIGNATURE" --arg policy "$POLICY" --arg actor "$GITHUB_ACTOR" --arg run_url "$RUN_URL" \
+            --argjson sbom "$(num "$SBOM_PACKAGES")" \
+            --argjson gc "$(num "$GRYPE_CRITICAL")" --argjson gh "$(num "$GRYPE_HIGH")" --argjson gm "$(num "$GRYPE_MEDIUM")" \
+            --argjson zh "$(num "$ZAP_HIGH")" --argjson zm "$(num "$ZAP_MEDIUM")" --argjson zl "$(num "$ZAP_LOW")" \
+            '{event_type: "deployment", service: "aws-pipeline-2", version: $version, commit: $commit, image: $image,
+              outcome: $outcome, signature_verified: ($sig == "success"), policy_passed: ($policy == "success"), actor: $actor, run_url: $run_url,
+              sbom_packages: $sbom, grype_critical: $gc, grype_high: $gh, grype_medium: $gm,
+              zap_high: $zh, zap_medium: $zm, zap_low: $zl}' > event.json
+          cat event.json
+          jq -n --argjson ts "$(date +%s%3N)" --arg msg "$(cat event.json)" '[{timestamp: $ts, message: $msg}]' > events.json
+          STREAM="deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          aws logs create-log-stream --log-group-name "$DEPLOY_LOG_GROUP" --log-stream-name "$STREAM" || true
+          aws logs put-log-events --log-group-name "$DEPLOY_LOG_GROUP" --log-stream-name "$STREAM" --log-events file://events.json > /dev/null
+          echo "Deployment record written to $DEPLOY_LOG_GROUP"

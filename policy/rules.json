@@ -1,0 +1,15 @@
+{
+  "_comment": "Single source of truth for the preventive guardrails. Read by Terraform (input validation and the CI roles' region lock) and by policy/check.py (the plan-time and deploy-time gates). Changing this file goes through code review like any other change.",
+  "allowed_regions": ["us-east-1", "us-east-2"],
+  "fargate": {
+    "max_cpu": 1024,
+    "valid_sizes": {
+      "256": [512, 1024, 2048],
+      "512": [1024, 2048, 3072, 4096],
+      "1024": [2048, 3072, 4096, 5120, 6144, 7168, 8192],
+      "2048": [4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384]
+    }
+  },
+  "blocked_admin_ports": [22, 3389],
+  "forbidden_resource_types": ["aws_iam_user", "aws_iam_access_key", "aws_iam_user_login_profile"]
+}

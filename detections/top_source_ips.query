@@ -1,0 +1,6 @@
+# Which IPs are sending the most security-relevant events?
+fields src_ip, event_type
+| filter event_type in ["auth_failure", "suspicious_input", "rate_limited", "brute_force_suspected"]
+| stats count(*) as events by src_ip, event_type
+| sort events desc
+| limit 25

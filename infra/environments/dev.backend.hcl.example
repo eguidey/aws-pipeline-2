@@ -1,0 +1,6 @@
+# Copy to environments/dev.backend.hcl (git-ignored); replace ACCOUNT_ID.
+bucket       = "aws-pipeline-2-tfstate-ACCOUNT_ID"
+key          = "aws-pipeline-2/dev.tfstate"
+region       = "us-east-1"
+encrypt      = true
+use_lockfile = true

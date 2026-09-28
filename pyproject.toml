@@ -1,0 +1,16 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+extend-exclude = ["infra", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "BLE"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106"]
+"gunicorn.conf.py" = ["S104"]
+"scripts/*" = ["S310", "S608"]  # attack simulator: payloads are intentional; URL scheme is validated  # binding 0.0.0.0 is required inside the container

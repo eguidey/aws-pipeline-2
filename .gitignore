@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.env
+.env.*
+
+# Terraform - never commit state (it contains secrets) or your personal variables
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/terraform.tfvars
+infra/environments/*.tfvars
+infra/environments/*.backend.hcl
+infra/.build/
+infra/bootstrap/.terraform/
+infra/bootstrap/*.tfstate
+infra/bootstrap/*.tfstate.*
+infra/bootstrap/*.tfvars
+infra/.terraform.lock.hcl.bak
+crash.log
+tfplan
+plan.json

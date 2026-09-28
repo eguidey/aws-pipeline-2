@@ -1,0 +1,5 @@
+# Failed logins grouped by source and targeted user (brute force vs. password spraying).
+fields @timestamp, src_ip, user
+| filter event_type = "auth_failure"
+| stats count(*) as failures, count_distinct(user) as users_targeted by src_ip
+| sort failures desc

@@ -1,0 +1,6 @@
+# One timeline of releases and attacks: which build was live when each attack began,
+# and what that build's scans reported. Run over the deployments + app log groups.
+fields @timestamp, event_type, version, src_ip, signatures, outcome, image, grype_critical, grype_high, zap_high, zap_medium, signature_verified
+| filter event_type in ["deployment", "brute_force_suspected", "suspicious_input", "rate_limited"]
+| sort @timestamp desc
+| limit 200
