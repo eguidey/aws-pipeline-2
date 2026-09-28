@@ -38,8 +38,17 @@ def health():
 
 
 @api.get("/api/items")
-def list_items():
-    return jsonify(items=list(_items.values()))
+   def list_items():
+       items = list(_items.values())
+       search = request.args.get("search")
+       if search is None:
+           return jsonify(items=items)
+       term = search.strip()
+       if not term or not ITEM_NAME.fullmatch(term):
+           log_event(logging.WARNING, "validation_error", "Rejected invalid search term", errors=["search"])
+           return jsonify(errors=["search may only contain letters, numbers, spaces and . , ' ( ) / + # -"]), 400
+       needle = term.casefold()
+       return jsonify(items=[item for item in items if needle in item["name"].casefold()])
 
 
 @api.get("/api/items/<int:item_id>")
