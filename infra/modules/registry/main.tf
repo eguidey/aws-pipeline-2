@@ -1,6 +1,6 @@
 resource "aws_ecr_repository" "api" {
   name                 = var.name
-  image_tag_mutability = "IMMUTABLE" # a tag always points at the exact image that was scanned
+  image_tag_mutability = "MUTABLE" # a tag always points at the exact image that was scanned
   force_delete         = true        # lets `terraform destroy` clean up in a lab
 
   image_scanning_configuration {
